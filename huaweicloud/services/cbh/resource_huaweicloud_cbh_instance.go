@@ -142,6 +142,13 @@ func ResourceCBHInstance() *schema.Resource {
 				ForceNew:    true,
 				Description: `Specifies whether the IPv6 network is enabled.`,
 			},
+			"tags": {
+				Type:        schema.TypeMap,
+				Elem:        &schema.Schema{Type: schema.TypeString},
+				Optional:    true,
+				Computed:    true,
+				Description: `The key/value pairs to associate with the bandwidth package.`,
+			},
 			"private_ip": {
 				Type:        schema.TypeString,
 				Computed:    true,
@@ -396,6 +403,7 @@ func buildCreateInstanceParams(d *schema.ResourceData, cfg *config.Config) (inte
 		"availability_zone": utils.ValueIngoreEmpty(d.Get("availability_zone")),
 		"region":            cfg.GetRegion(d),
 		"hx_password":       utils.ValueIngoreEmpty(d.Get("password")),
+		"tags":              utils.ExpandResourceTagsMap(d.Get("tags").(map[string]interface{})),
 		"bastion_type":      "OEM",
 		"ipv6_enable":       utils.ValueIngoreEmpty(d.Get("ipv6_enable")),
 	}
@@ -620,7 +628,58 @@ func resourceCBHInstanceUpdate(ctx context.Context, d *schema.ResourceData, meta
 			return diag.Errorf("error updating the auto-renew of the CBH instance (%s): %s", d.Id(), err)
 		}
 	}
+
+	if d.HasChange("tags") {
+		err = updateBandwidthPackageTags(updateCbhInstanceClient, d, cfg.DomainID)
+		if err != nil {
+			return diag.FromErr(err)
+		}
+	}
 	return resourceCBHInstanceRead(ctx, d, meta)
+}
+
+func updateBandwidthPackageTags(client *golangsdk.ServiceClient, d *schema.ResourceData, domainId string) error {
+	var updateBandwidthPackageTagsHttpUrl = "v3/{domain_id}/ccaas/bandwidth-package/{id}/tags/action"
+
+	updateBandwidthPackageTagsPath := client.Endpoint + updateBandwidthPackageTagsHttpUrl
+	updateBandwidthPackageTagsPath = strings.ReplaceAll(updateBandwidthPackageTagsPath, "{domain_id}", domainId)
+	updateBandwidthPackageTagsPath = strings.ReplaceAll(updateBandwidthPackageTagsPath, "{id}", d.Id())
+
+	updateBandwidthPackageTagsOpt := golangsdk.RequestOpts{
+		KeepResponseBody: true,
+		OkCodes: []int{
+			204,
+		},
+	}
+
+	oRaw, nRaw := d.GetChange("tags")
+	oMap := oRaw.(map[string]interface{})
+	nMap := nRaw.(map[string]interface{})
+
+	// remove old tags
+	if len(oMap) > 0 {
+		updateBandwidthPackageTagsOpt.JSONBody = map[string]interface{}{
+			"action": "delete",
+			"tags":   utils.ExpandResourceTagsMap(oMap),
+		}
+		_, err := client.Request("POST", updateBandwidthPackageTagsPath, &updateBandwidthPackageTagsOpt)
+		if err != nil {
+			return fmt.Errorf("error updating bandwidth package: %s", err)
+		}
+	}
+
+	// set new tags
+	if len(nMap) > 0 {
+		updateBandwidthPackageTagsOpt.JSONBody = map[string]interface{}{
+			"action": "create",
+			"tags":   utils.ExpandResourceTagsMap(nMap),
+		}
+		_, err := client.Request("POST", updateBandwidthPackageTagsPath, &updateBandwidthPackageTagsOpt)
+		if err != nil {
+			return fmt.Errorf("error updating bandwidth package: %s", err)
+		}
+	}
+	return nil
 }
 
 func bindEip(d *schema.ResourceData, client *golangsdk.ServiceClient, cfg *config.Config, publicIpId,
@@ -794,6 +853,7 @@ func resourceCBHInstanceRead(_ context.Context, d *schema.ResourceData, meta int
 			d.Set("security_group_id", instance["securityGroupId"]),
 			d.Set("flavor_id", instance["specification"]),
 			d.Set("availability_zone", instance["zone"]),
+			d.Set("tags", utils.FlattenTagsToMap(utils.PathSearch("tags", instance, nil))),
 			d.Set("version", instance["bastionVersion"]),
 		)
 		break
